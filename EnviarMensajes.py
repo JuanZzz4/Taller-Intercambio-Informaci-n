@@ -1,40 +1,72 @@
 import psutil
-import speedtest
-import paho.mqtt.publish as publish
+import json
+import paho.mqtt.client as mqtt
 import time
+import uuid
+from datetime import datetime
 
-# Configuración del servidor HiveMQ
-host = "broker.hivemq.com"  # Puedes cambiarlo si es necesario
-topic = "rendimiento_topic"
+mqtt_broker = "broker.hivemq.com"
+mqtt_port = 1883
+mqtt_topic = "Taller arquitectura"
 
-# Funciones para obtener el rendimiento del sistema
-def obtener_rendimiento_cpu():
-    return psutil.cpu_percent()
+def enviar_metricas(client):
+    cpu_percent = psutil.cpu_percent()
+    mem_percent = psutil.virtual_memory().percent
+    network_info = psutil.net_io_counters()
+    temperatura = obtener_temperatura()
 
-def obtener_rendimiento_memoria():
-    memory = psutil.virtual_memory()
-    memory_available = memory.available / (1024 * 1024)  # Convertir a MB
-    memory_used = memory.used / (1024 * 1024)  # Convertir a MB
-    return memory_available, memory_used
+    fecha_hora_actual = datetime.now().isoformat()
 
-def obtener_rendimiento_red():
-    speed_test = speedtest.Speedtest()
-    download_speed = speed_test.download() / 1e6  # Convertir a Mbps
-    upload_speed = speed_test.upload() / 1e6  # Convertir a Mbps
-    return download_speed, upload_speed
+    datos_json = {
+        "cpu": cpu_percent,
+        "memory": mem_percent,
+        "net": {
+            "bytes_enviados": network_info.bytes_sent,
+            "bytes_recibidos": network_info.bytes_recv
+        },
+        "mac_address": obtener_mac_address(),
+        "temperature": temperatura,
+        "date": fecha_hora_actual
+    }
 
-if __name__ == "__main__":
+    client.publish(mqtt_topic, json.dumps(datos_json))
+    print("Datos enviados:", datos_json)
+
+def obtener_temperatura():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as file:
+            temperatura_raw = float(file.read()) / 1000.0
+        return temperatura_raw
+    except Exception as e:
+        return 0
+
+def obtener_mac_address():
+    interfaz_activa = psutil.net_if_addrs().get('Ethernet', None)
+
+    if interfaz_activa is not None:
+        mac_address = interfaz_activa[0].address
+        return mac_address
+    else:
+        return None
+
+def on_connect(client, userdata, flags, rc):
+    print(f"Conectado al broker con código de resultado: {rc}")
+
+client = mqtt.Client()
+client.on_connect = on_connect
+
+client.connect(mqtt_broker, mqtt_port, 60)
+
+client.loop_start()
+
+try:
     while True:
-        # Obtener el rendimiento del sistema
-        cpu_percent = obtener_rendimiento_cpu()
-        memory_available, memory_used = obtener_rendimiento_memoria()
-        download_speed, upload_speed = obtener_rendimiento_red()
+        enviar_metricas(client)
+        time.sleep(10)
+except KeyboardInterrupt:
+    pass
+finally:
+    client.loop_stop()
+    client.disconnect()
+    print("Conexión cerrada.")
 
-        # Crear un mensaje con los datos
-        mensaje = f"CPU: {cpu_percent}% | Memoria disponible: {memory_available:.2f} MB | Memoria en uso: {memory_used:.2f} MB | Descarga: {download_speed:.2f} Mbps | Subida: {upload_speed:.2f} Mbps"
-
-        # Publicar el mensaje en el tema MQTT
-        publish.single(topic, mensaje, hostname=host)
-
-        # Esperar antes de recopilar nuevamente
-        time.sleep(60)  # Espera 60 segundos (puedes ajustar según tus necesidades)
